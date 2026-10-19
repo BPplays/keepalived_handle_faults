@@ -45,6 +45,196 @@ use std::{
 };
 use tokio::time::sleep;
 
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use std::{
+	fs::{self, File, OpenOptions},
+	io,
+	time::{UNIX_EPOCH},
+};
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RestartHistory {
+	events: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct RestartTracker {
+	path: PathBuf,
+	window: Duration,
+	limit: usize,
+}
+
+impl RestartTracker {
+	fn new(
+		path: impl Into<PathBuf>,
+		window: Duration,
+		limit: usize,
+	) -> Result<Self, Box<dyn Error + Send + Sync>> {
+		if window.is_zero() {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"restart window must be greater than zero",
+			).into());
+		}
+
+		if limit == 0 {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"restart limit must be greater than zero",
+			).into());
+		}
+
+		Ok(Self {
+			path: path.into(),
+			window,
+			limit,
+		})
+	}
+
+	fn now() -> Result<u64, Box<dyn Error + Send + Sync>> {
+		Ok(std::time::SystemTime::now()
+			.duration_since(UNIX_EPOCH)?
+			.as_secs())
+	}
+
+	fn prune_history(&self, history: &mut RestartHistory) -> Result<(), Box<dyn Error + Send + Sync>> {
+		let now = Self::now()?;
+		let cutoff = now.saturating_sub(
+			self.window.as_secs().saturating_mul(3)
+		);
+
+		history.events.retain(|&ts| ts >= cutoff && ts <= now);
+		history.events.sort_unstable();
+
+		// Hard cap: keep only the newest 10x the configured limit.
+		let max_events = self.limit.saturating_mul(10);
+
+		if history.events.len() > max_events {
+			let excess = history.events.len() - max_events;
+			history.events.drain(..excess);
+		}
+
+		Ok(())
+	}
+
+	/// Acquire a stable sidecar lock, reload, update and save.
+	fn with_history<T>(
+		&self,
+		operation: impl FnOnce(&mut RestartHistory) -> Result<T, Box<dyn Error + Send + Sync>>,
+	) -> Result<T, Box<dyn Error + Send + Sync>> {
+		if let Some(parent) = self.path.parent() {
+			if !parent.as_os_str().is_empty() {
+				fs::create_dir_all(parent)?;
+			}
+		}
+
+		// Lock a separate, persistent file rather than the data file:
+		// the data file is atomically replaced during saving.
+		let lock_path = self.path.with_extension("lock");
+
+		let lock_file = OpenOptions::new()
+			.create(true)
+			.read(true)
+			.write(true)
+			.open(lock_path)?;
+
+		FileExt::lock_exclusive(&lock_file)?;
+
+		// Always reload after acquiring the lock.
+		let result = (|| -> Result<T, Box<dyn Error + Send + Sync>> {
+			let mut history = if self.path.exists() {
+				let bytes = fs::read(&self.path)?;
+				ciborium::de::from_reader(bytes.as_slice())?
+			} else {
+				RestartHistory::default()
+			};
+
+			self.prune_history(&mut history)?;
+
+			let value = operation(&mut history)?;
+
+			// Serialize as CBOR.
+			let mut bytes = Vec::new();
+			ciborium::ser::into_writer(&history, &mut bytes)?;
+
+			// Write a temporary file and atomically replace the history.
+			let tmp = self.path.with_extension("tmp");
+			fs::write(&tmp, bytes)?;
+			fs::rename(&tmp, &self.path)?;
+
+			Ok(value)
+		})();
+
+		let unlock_result = FileExt::unlock(&lock_file);
+
+		match (result, unlock_result) {
+			(Err(err), _) => Err(err),
+			(Ok(_), Err(err)) => Err(err.into()),
+			(Ok(value), Ok(())) => Ok(value),
+		}
+	}
+
+	/// Number of restarts in the rolling window.
+	fn count(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
+		self.with_history(|history| {
+			let now = Self::now()?;
+			let cutoff = now.saturating_sub(self.window.as_secs());
+
+			Ok(history.events.iter()
+				.filter(|&&ts| ts >= cutoff && ts <= now)
+				.count())
+		})
+	}
+
+	/// Average restart rate in restarts per second.
+	fn average_rate(&self) -> Result<f64, Box<dyn Error + Send + Sync>> {
+		self.with_history(|history| {
+			let now = Self::now()?;
+			let cutoff = now.saturating_sub(self.window.as_secs());
+
+			let count = history.events.iter()
+				.filter(|&&ts| ts >= cutoff && ts <= now)
+				.count();
+
+			Ok(count as f64 / self.window.as_secs_f64())
+		})
+	}
+
+	fn limit_reached(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+		Ok(self.count()? > self.limit)
+	}
+
+	/// Record an event only when this method is called.
+	fn record_restart(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+		self.with_history(|history| {
+			history.events.push(Self::now()?);
+			Ok(())
+		})
+	}
+
+	fn try_record_restart(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+		self.with_history(|history| {
+			let now = Self::now()?;
+			let cutoff = now.saturating_sub(self.window.as_secs());
+
+			let count = history.events.iter()
+				.filter(|&&ts| ts >= cutoff && ts <= now)
+				.count();
+
+			if count > self.limit {
+				return Ok(false);
+			}
+
+			history.events.push(now);
+			Ok(true)
+		})
+	}
+
+}
+
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceIp {
 	/// The interface's primary name, even when matched by an altname.
@@ -131,14 +321,18 @@ enum StdoutTimestamps {
 #[command(version, about)]
 struct Args {
 	/// Path to the master IP address list
-	#[arg(short = 'i', long = "ips")]
+	#[arg(short = 'f', long = "ips-file")]
 	ips_file: Option<PathBuf>,
+
+	/// Path to the master IP address list
+	#[arg(short = 'r', long = "restart-tracking-file")]
+	restart_tracking_file: Option<PathBuf>,
 
 	/// Service to restart when a fault is detected
 	#[arg(short = 's', long = "service")]
 	service: String,
 
-	#[arg(short = 'f', long = "interface")]
+	#[arg(short = 'i', long = "interface")]
 	interface: Option<String>,
 
 	#[arg(short = 'l', long = "log-file")]
@@ -514,17 +708,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 
 	if restart {
-		let connection = Connection::system().await?;
-		let manager = ManagerProxy::new(&connection).await?;
+		let default_restarts_path = PathBuf::from_str(
+			"/run/keepalived_handle_fault/restarts",
+		).unwrap();
 
-		manager
-			.restart_unit(
-				args.service.to_owned(),
-				"replace".to_owned(),
-			)
-		.await?;
+		let tracker = RestartTracker::new(
+			args.restart_tracking_file.unwrap_or(
+				default_restarts_path
+					.join(args.service.clone())
+					.join("restarts.cbor"),
+			),
+			Duration::from_secs(500),
+			5,
+		)?;
 
-		info!("restarted {}", args.service)
+		debug!("Restarts in window: {}", tracker.count()?);
+		debug!(
+			"Average rate: {:.4} restarts/sec",
+			tracker.average_rate()?
+		);
+
+		if tracker.try_record_restart()? {
+			let connection = Connection::system().await?;
+			let manager = ManagerProxy::new(&connection).await?;
+
+			manager
+				.restart_unit(
+					args.service.to_owned(),
+					"replace".to_owned(),
+				)
+			.await?;
+
+			info!("restarted {}", args.service)
+		} else {
+			info!("Restart limit reached; suppressing restart");
+		}
+
 	}
 
 	Ok(())
