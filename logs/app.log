@@ -1,0 +1,8 @@
+2026-10-19T17:25:47.536077Z  INFO main: Instance became MASTER
+2026-10-19T17:25:52.620277Z ERROR main: restarted chrony.service
+2026-10-19T17:27:30.567357Z  INFO main: Instance became MASTER
+2026-10-19T17:27:35.638927Z ERROR main: failed to find IPs on the system
+2026-10-19T17:27:35.654019Z  INFO main: restarted chrony.service
+2026-10-19T17:31:36.510771Z  INFO main: Instance became MASTER
+2026-10-19T17:31:41.576887Z ERROR main: failed to find expected IPs on the system after 5s
+2026-10-19T17:31:41.589807Z  INFO main: restarted chrony.service

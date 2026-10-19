@@ -1,0 +1,19 @@
+[package]
+name = "main"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "env", "unicode"] }
+futures-util = "0.3.34"
+humansize = "2.1.3"
+humantime = "2.4.0"
+ipnet = { version = "2.12.2", features = ["ser_as_str", "serde"] }
+ltrace = "0.1.3"
+rtnetlink = "0.23.0"
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = { version = "0.1.44", features = ["async-await", "log"] }
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["time", "tracing", "tracing-serde", "serde", "local-time", "chrono", "env-filter"] }
+uom = "0.38.0"
+zbus_systemd = { version = "0.26200.0", features = ["systemd1", "zbus-async-tokio", "locale1", "login1", "hostname1", "timesync1", "timedate1", "resolve1"] }
