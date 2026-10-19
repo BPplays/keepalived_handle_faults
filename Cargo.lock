@@ -601,6 +601,7 @@ dependencies = [
  "ipnet",
  "ltrace",
  "rtnetlink",
+ "rustix",
  "tokio",
  "tracing",
  "tracing-appender",

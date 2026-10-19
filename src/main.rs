@@ -6,15 +6,17 @@ use tracing;
 use tracing::{debug, error, info, warn};
 use uom::si::information::{byte, megabyte, gigabyte};
 use humantime;
+use rustix::process::setpriority_process;
 
 use ltrace::{RollingWriter, Rotation};
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::{WorkerGuard};
 use tracing_subscriber::{
-    layer::SubscriberExt,
-    util::SubscriberInitExt,
-    EnvFilter,
+	layer::SubscriberExt,
+	util::SubscriberInitExt,
+	EnvFilter,
 };
+use tracing_subscriber::filter::LevelFilter;
 
 use futures_util::TryStreamExt;
 use rtnetlink::packet_route::{
@@ -28,12 +30,18 @@ use std::{
 };
 use ipnet::IpNet;
 
+use std::io::IsTerminal;
+use tracing_subscriber::fmt::{
+	format::Writer,
+	time::{FormatTime, SystemTime},
+};
+
 use zbus_systemd::{
 	systemd1::ManagerProxy,
 	zbus::Connection,
 };
 use std::{
-    time::{Duration, Instant},
+	time::{Duration, Instant},
 };
 use tokio::time::sleep;
 
@@ -52,6 +60,20 @@ impl From<InterfaceIp> for IpNet {
 impl From<&InterfaceIp> for IpNet {
 	fn from(value: &InterfaceIp) -> Self {
 		value.address
+	}
+}
+
+struct ConditionalTimer {
+	enabled: bool,
+}
+
+impl FormatTime for ConditionalTimer {
+	fn format_time(&self, w: &mut Writer<'_>) -> std::fmt::Result {
+		if self.enabled {
+			SystemTime.format_time(w)
+		} else {
+			Ok(())
+		}
 	}
 }
 
@@ -95,6 +117,16 @@ impl FromStr for KeepalivedState {
 	}
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum StdoutTimestamps {
+	/// Automatically detect based on whether stdout is a terminal
+	Auto,
+	/// Always include timestamps
+	Always,
+	/// Never include timestamps
+	Never,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
@@ -109,8 +141,29 @@ struct Args {
 	#[arg(short = 'f', long = "interface")]
 	interface: Option<String>,
 
-	#[arg(short = 'l', long = "log_file")]
+	#[arg(short = 'l', long = "log-file")]
 	log_file: Option<String>,
+
+	/// Minimum log level
+	#[arg(
+		long = "log-level",
+		// default_value = "info",
+		default_value = "debug",
+		value_parser = clap::value_parser!(LevelFilter)
+	)]
+	log_level: LevelFilter,
+
+	/// Control timestamps in stdout logs
+	#[arg(
+		long = "stdout-timestamps",
+		value_enum,
+		default_value_t = StdoutTimestamps::Auto
+	)]
+	stdout_timestamps: StdoutTimestamps,
+
+	/// process niceness
+	#[arg(long = "nice", allow_hyphen_values = true)]
+	niceness: Option<i32>,
 
 	#[arg(value_name = "TYPE")]
 	keepalived_type: KeepalivedType,
@@ -277,7 +330,7 @@ pub fn parse_ip_file(
 					)
 				})?;
 
-				let max_prefix = if address.is_ipv4() { 32 } else { 128 };
+				let max_prefix = if address.is_ipv6() { 128 } else { 32 };
 
 				if prefix_len > max_prefix {
 					return Err(io::Error::new(
@@ -309,46 +362,99 @@ pub fn parse_ip_file(
 	Ok(result)
 }
 
-fn init_logging() -> Result<WorkerGuard, Box<dyn std::error::Error + Send + Sync>> {
-	let limit = uom::si::f64::Information::new::<megabyte>(5.0);
+fn init_logging(
+	path: Option<impl AsRef<Path>>,
+	level: LevelFilter,
+	stdout_timestamps: StdoutTimestamps,
+) -> Result<
+	Option<WorkerGuard>,
+	Box<dyn std::error::Error + Send + Sync>,
+> {
+	let filter = EnvFilter::try_from_default_env()
+		.unwrap_or_else(|_| EnvFilter::new(level.to_string()));
 
-	let writer = RollingWriter::builder("logs/app.log")
-		.rotation(Rotation::Never)
-		.max_file_size(limit.get::<byte>() as u64)
-		.max_files(5)
-		.build()?;
+	let enable_stdout_timestamps = match stdout_timestamps {
+		StdoutTimestamps::Auto => std::io::stdout().is_terminal(),
+		StdoutTimestamps::Always => true,
+		StdoutTimestamps::Never => false,
+	};
 
-	let (file_writer, guard) = non_blocking(writer);
+	let stdout_layer = tracing_subscriber::fmt::layer()
+		.with_writer(std::io::stdout)
+		.with_timer(ConditionalTimer {
+			enabled: enable_stdout_timestamps,
+		});
 
-	tracing_subscriber::registry()
-		.with(EnvFilter::try_from_default_env()
-			.unwrap_or_else(|_| EnvFilter::new("info")))
-		.with(tracing_subscriber::fmt::layer()
-			.with_writer(std::io::stdout))
-		.with(tracing_subscriber::fmt::layer()
-			.with_writer(file_writer)
-			.with_ansi(false))
-		.try_init()?;
+	if let Some(path) = path {
+		let limit = uom::si::f64::Information::new::<megabyte>(5.0);
 
-	Ok(guard)
+		let writer = RollingWriter::builder(path)
+			.rotation(Rotation::Never)
+			.max_file_size(limit.get::<byte>() as u64)
+			.max_files(3)
+			.build()?;
+
+		let (file_writer, guard) = non_blocking(writer);
+
+		tracing_subscriber::registry()
+			.with(filter)
+			.with(stdout_layer)
+			.with(
+				tracing_subscriber::fmt::layer()
+					.with_writer(file_writer)
+					.with_ansi(false),
+			)
+			.try_init()?;
+
+		Ok(Some(guard))
+	} else {
+		tracing_subscriber::registry()
+			.with(filter)
+			.with(stdout_layer)
+			.try_init()?;
+
+		Ok(None)
+	}
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-	let _guard: WorkerGuard = init_logging().unwrap();
+	let args = Args::parse();
+
+	match args.niceness {
+		Some(niceness) => {
+			let _ = setpriority_process(None, niceness);
+		}
+		None => {}
+	}
+
 
 	let mut restart = false;
 
-	let args = Args::parse();
+	let _guard = init_logging(
+		args.log_file.as_deref(),
+		args.log_level,
+		args.stdout_timestamps,
+	).unwrap();
+
+
 
 	debug!("{args:#?}");
 
+	match args.keepalived_type {
+		KeepalivedType::Unknown(ktype) => {
+			debug!("keepalived instance type unknown \"{ktype}\"")
+		}
+		_ => {}
+
+	}
+
 	let expected_ips: Option<Vec<IpNet>> = match args.ips_file.as_deref() {
-		Some(path) => Some(parse_ip_file(path).unwrap_or_default()),
+		Some(path) => Some(parse_ip_file(path).unwrap()),
 		None => None,
 	};
 
-	debug!("expected ips from file: {expected_ips:#?}");
+	debug!("expected IPs from file: {expected_ips:#?}");
 
 	match args.keepalived_state {
 		KeepalivedState::Master => {
@@ -362,12 +468,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 				debug!("system ips: {:#?}", interface_ips);
 				match (interface_ips, expected_ips.as_ref()) {
 					(Ok(interface_ips), Some(expected_ips)) => {
-						let contains_all = expected_ips.iter().all(|expected| {
+						let if_contains_all_ips = expected_ips.iter().all(|expected| {
 							interface_ips.iter()
 								.any(|ip| ip.address.contains(expected))
 						});
-						debug!("ips contains ips: {contains_all}");
-						if !contains_all {
+						debug!("interfaces contains expected IPs: {if_contains_all_ips}");
+						if !if_contains_all_ips {
 							restart = true;
 						} else {
 							restart = false;

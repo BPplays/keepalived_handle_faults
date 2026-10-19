@@ -11,6 +11,7 @@ humantime = "2.4.0"
 ipnet = { version = "2.12.2", features = ["ser_as_str", "serde"] }
 ltrace = "0.1.3"
 rtnetlink = "0.23.0"
+rustix = { version = "1.1.5", features = ["process"] }
 tokio = { version = "1.53.3", features = ["full"] }
 tracing = { version = "0.1.44", features = ["async-await", "log"] }
 tracing-appender = "0.2.5"
