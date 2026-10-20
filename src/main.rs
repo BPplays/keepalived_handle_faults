@@ -643,12 +643,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 	}
 
-	let expected_ips: Option<Vec<IpNet>> = match args.ips_file.as_deref() {
-		Some(path) => Some(parse_ip_file(path).unwrap()),
-		None => None,
-	};
-
-	debug!("expected IPs from file: {expected_ips:#?}");
 
 	match args.keepalived_state {
 		KeepalivedState::Master => {
@@ -658,6 +652,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 			let start = Instant::now();
 
 			while start.elapsed() < timeout {
+				let expected_ips: Option<Vec<IpNet>> = args
+					.ips_file
+					.as_deref()
+					.and_then(|path| parse_ip_file(path).ok());
+
+				debug!("expected IPs from file: {expected_ips:#?}");
+
 				let interface_ips = get_interface_ips(args.interface.as_deref()).await;
 				debug!("system ips: {:#?}", interface_ips);
 				match (interface_ips, expected_ips.as_ref()) {
@@ -676,7 +677,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 					}
 					(Ok(_), None) => {
 						info!("expected ips is none");
-						break;
 					}
 					(Err(err), _) => {
 						warn!("error getting ips {err}");

@@ -595,6 +595,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "keepalived_handle_faults"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "clap",
+ "fs2",
+ "futures-util",
+ "humansize",
+ "humantime",
+ "ipnet",
+ "ltrace",
+ "rtnetlink",
+ "rustix",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uom",
+ "zbus_systemd",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -642,29 +665,6 @@ dependencies = [
  "chrono",
  "flate2",
  "log",
-]
-
-[[package]]
-name = "main"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "clap",
- "fs2",
- "futures-util",
- "humansize",
- "humantime",
- "ipnet",
- "ltrace",
- "rtnetlink",
- "rustix",
- "serde",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "uom",
- "zbus_systemd",
 ]
 
 [[package]]
