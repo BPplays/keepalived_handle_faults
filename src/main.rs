@@ -675,7 +675,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 					.and_then(|path| match parse_ip_file(path) {
 						Ok(ips) => Some(ips),
 						Err(err) => {
-							error!("Failed to parse IP file: {err}");
+							error!("Failed to parse expected IP file: {err}");
 							None
 						}
 					});
