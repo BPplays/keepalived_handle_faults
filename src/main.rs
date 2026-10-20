@@ -291,6 +291,7 @@ enum KeepalivedState {
 	Master,
 	Backup,
 	Fault,
+	Stop,
 	Unknown(String),
 }
 
@@ -302,6 +303,7 @@ impl FromStr for KeepalivedState {
 			"master" => Self::Master,
 			"backup" => Self::Backup,
 			"fault" => Self::Fault,
+			"stop" => Self::Stop,
 			_ => Self::Unknown(s.to_string()),
 		})
 	}
