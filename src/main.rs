@@ -789,7 +789,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 			.await?;
 
 			info!(
-				"Queued restart of {} (job: {:?})",
+				"Queued restart of {} (job: {})",
 				args.service,
 				job,
 			);
