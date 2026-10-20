@@ -655,7 +655,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 				let expected_ips: Option<Vec<IpNet>> = args
 					.ips_file
 					.as_deref()
-					.and_then(|path| parse_ip_file(path).ok());
+					.and_then(|path| match parse_ip_file(path) {
+						Ok(ips) => Some(ips),
+						Err(err) => {
+							error!("Failed to parse IP file: {err}");
+							None
+						}
+					});
 
 				debug!("expected IPs from file: {expected_ips:#?}");
 
