@@ -8,6 +8,8 @@ use uom::si::information::{byte, megabyte, gigabyte};
 use humantime;
 use rustix::process::setpriority_process;
 
+use std::collections::HashSet;
+
 use ltrace::{RollingWriter, Rotation};
 use tracing_appender::non_blocking;
 use tracing_appender::non_blocking::{WorkerGuard};
