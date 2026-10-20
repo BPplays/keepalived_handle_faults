@@ -239,17 +239,17 @@ impl RestartTracker {
 pub struct InterfaceIp {
 	/// The interface's primary name, even when matched by an altname.
 	pub interface: String,
-	pub address: IpNet,
+	pub ipnet: IpNet,
 }
 
 impl From<InterfaceIp> for IpNet {
 	fn from(value: InterfaceIp) -> Self {
-		value.address
+		value.ipnet
 	}
 }
 impl From<&InterfaceIp> for IpNet {
 	fn from(value: &InterfaceIp) -> Self {
-		value.address
+		value.ipnet
 	}
 }
 
@@ -319,6 +319,12 @@ enum StdoutTimestamps {
 	Never,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum NetworkCompareMode {
+	Strict,
+	IPbased,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
@@ -356,6 +362,13 @@ struct Args {
 		default_value_t = StdoutTimestamps::Auto
 	)]
 	stdout_timestamps: StdoutTimestamps,
+
+	#[arg(
+		long = "network-compare-mode",
+		value_enum,
+		default_value_t = NetworkCompareMode::IPbased
+	)]
+	network_compare_mode: NetworkCompareMode,
 
 	/// process niceness
 	#[arg(long = "nice", allow_hyphen_values = true)]
@@ -466,7 +479,7 @@ pub async fn get_interface_ips(
 			let network = IpNet::new(address, addr.header.prefix_len)?;
 			result.push(InterfaceIp {
 				interface: interface.clone(),
-				address: network,
+				ipnet: network,
 			});
 		}
 	}
@@ -671,10 +684,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 				debug!("system ips: {:#?}", interface_ips);
 				match (interface_ips, expected_ips.as_ref()) {
 					(Ok(interface_ips), Some(expected_ips)) => {
-						let if_contains_all_ips = expected_ips.iter().all(|expected| {
-							interface_ips.iter()
-								.any(|ip| ip.address.contains(expected))
-						});
+						let interface_ips_set: HashSet<IpNet> = interface_ips
+							.iter()
+							.map(|ip| {
+								match args.network_compare_mode {
+									NetworkCompareMode::Strict => {
+										ip.ipnet
+									}
+
+									NetworkCompareMode::IPbased => {
+										IpNet::from(ip.ipnet.addr())
+									}
+								}
+							})
+							.collect();
+
+						let if_contains_all_ips = expected_ips
+							.iter()
+							.map(|ip| {
+								match args.network_compare_mode {
+									NetworkCompareMode::Strict => {
+										*ip
+									}
+
+									NetworkCompareMode::IPbased => {
+										IpNet::from(ip.addr())
+									}
+								}
+							})
+							.all(|expected| interface_ips_set.contains(&expected));
+
 						debug!("interfaces contains expected IPs: {if_contains_all_ips}");
 						if !if_contains_all_ips {
 							restart = true;
