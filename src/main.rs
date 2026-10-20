@@ -781,14 +781,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 			let connection = Connection::system().await?;
 			let manager = ManagerProxy::new(&connection).await?;
 
-			manager
+			let job = manager
 				.restart_unit(
-					args.service.to_owned(),
+					args.service.clone(),
 					"replace".to_owned(),
 				)
 			.await?;
 
-			info!("restarted {}", args.service)
+			info!(
+				"Queued restart of {} (job: {:?})",
+				args.service,
+				job,
+			);
 		} else {
 			info!("Restart limit reached; suppressing restart");
 		}
