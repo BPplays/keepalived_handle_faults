@@ -685,7 +685,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 				let interface_ips = get_interface_ips(args.interface.as_deref()).await;
 				debug!("system ips: {:#?}", interface_ips);
 				match (interface_ips, expected_ips.as_ref()) {
-					(Ok(interface_ips), Some(expected_ips)) => {
+					(Ok(interface_ips), Some(expected_ips)) if {
+						!expected_ips.is_empty()
+					} => {
 						let interface_ips_set: HashSet<IpNet> = interface_ips
 							.iter()
 							.map(|ip| {
@@ -723,6 +725,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 							restart = false;
 							break;
 						}
+					}
+					(Ok(_), Some(expected_ips)) if {
+						expected_ips.is_empty()
+					} => {
+						error!("expected ips is empty");
+					}
+					(Ok(_), Some(_)) => {
+						error!("misc error, no conditions for other arms then \"(Ok(_), Some(_))\" matched, this shouldn't happen generally");
 					}
 					(Ok(_), None) => {
 						info!("expected ips is none");
