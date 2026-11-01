@@ -790,27 +790,8 @@ enum AppError {
 	},
 }
 
-#[tokio::main]
-async fn main() -> Result<(), AppError> {
-	let args = Args::parse();
-
-	match args.niceness {
-		Some(niceness) => {
-			let _ = setpriority_process(None, niceness);
-		}
-		None => {}
-	}
-
-
+async fn run(args: Args) -> Result<(), AppError> {
 	let mut restart = false;
-
-	let _guard = init_logging(
-		args.log_file.as_deref(),
-		args.log_level,
-		args.stdout_timestamps,
-	).unwrap();
-
-
 
 	debug!("{args:#?}");
 
@@ -971,6 +952,38 @@ async fn main() -> Result<(), AppError> {
 			);
 		} else {
 			info!("Restart limit reached; suppressing restart");
+		}
+
+	}
+
+	Ok(())
+}
+
+
+#[tokio::main]
+async fn main() -> Result<(), AppError> {
+	let args = Args::parse();
+
+	match args.niceness {
+		Some(niceness) => {
+			let _ = setpriority_process(None, niceness);
+		}
+		None => {}
+	}
+
+
+
+	let _guard = init_logging(
+		args.log_file.as_deref(),
+		args.log_level,
+		args.stdout_timestamps,
+	).unwrap();
+
+	let res = run(args).await;
+	match res {
+		Ok(_) => {}
+		Err(err) => {
+			error!("{err}")
 		}
 
 	}
