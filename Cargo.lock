@@ -77,6 +77,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.104"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
 name = "async-broadcast"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -598,6 +604,7 @@ dependencies = [
 name = "keepalived_handle_faults"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "ciborium",
  "clap",
  "fs2",
@@ -609,6 +616,7 @@ dependencies = [
  "rtnetlink",
  "rustix",
  "serde",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-appender",

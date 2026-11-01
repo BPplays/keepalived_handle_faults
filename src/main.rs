@@ -1,5 +1,7 @@
 
+use anyhow::Context;
 use clap::Parser;
+use uom::si::mass_concentration::Units::milligram_per_milliliter;
 use std::{path::Path, str::FromStr};
 use std::path::PathBuf;
 use tracing;
@@ -56,35 +58,29 @@ use std::{
 };
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct RestartHistory {
+pub struct RestartHistory {
 	events: Vec<u64>,
 }
 
 #[derive(Debug)]
-struct RestartTracker {
+pub struct RestartTracker {
 	path: PathBuf,
 	window: Duration,
 	limit: usize,
 }
 
 impl RestartTracker {
-	fn new(
+	pub fn new(
 		path: impl Into<PathBuf>,
 		window: Duration,
 		limit: usize,
-	) -> Result<Self, Box<dyn Error + Send + Sync>> {
+	) -> Result<Self, RestartTrackerError> {
 		if window.is_zero() {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				"restart window must be greater than zero",
-			).into());
+			return Err(RestartTrackerError::ZeroWindow);
 		}
 
 		if limit == 0 {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				"restart limit must be greater than zero",
-			).into());
+			return Err(RestartTrackerError::ZeroLimit);
 		}
 
 		Ok(Self {
@@ -94,22 +90,24 @@ impl RestartTracker {
 		})
 	}
 
-	fn now() -> Result<u64, Box<dyn Error + Send + Sync>> {
+	pub fn now() -> Result<u64, RestartTrackerError> {
 		Ok(std::time::SystemTime::now()
 			.duration_since(UNIX_EPOCH)?
 			.as_secs())
 	}
 
-	fn prune_history(&self, history: &mut RestartHistory) -> Result<(), Box<dyn Error + Send + Sync>> {
+	pub fn prune_history(
+		&self,
+		history: &mut RestartHistory,
+	) -> Result<(), RestartTrackerError> {
 		let now = Self::now()?;
 		let cutoff = now.saturating_sub(
-			self.window.as_secs().saturating_mul(3)
+			self.window.as_secs().saturating_mul(3),
 		);
 
 		history.events.retain(|&ts| ts >= cutoff && ts <= now);
 		history.events.sort_unstable();
 
-		// Hard cap: keep only the newest 10x the configured limit.
 		let max_events = self.limit.saturating_mul(10);
 
 		if history.events.len() > max_events {
@@ -119,35 +117,60 @@ impl RestartTracker {
 
 		Ok(())
 	}
-
 	/// Acquire a stable sidecar lock, reload, update and save.
 	fn with_history<T>(
 		&self,
-		operation: impl FnOnce(&mut RestartHistory) -> Result<T, Box<dyn Error + Send + Sync>>,
-	) -> Result<T, Box<dyn Error + Send + Sync>> {
+		operation: impl FnOnce(&mut RestartHistory) -> Result<T, RestartTrackerError>,
+	) -> Result<T, RestartTrackerError> {
 		if let Some(parent) = self.path.parent() {
 			if !parent.as_os_str().is_empty() {
-				fs::create_dir_all(parent)?;
+				fs::create_dir_all(parent).map_err(|source| {
+					RestartTrackerError::Io {
+						operation: "create restart history directory",
+						path: parent.to_path_buf(),
+						source,
+					}
+				})?;
 			}
 		}
 
-		// Lock a separate, persistent file rather than the data file:
-		// the data file is atomically replaced during saving.
 		let lock_path = self.path.with_extension("lock");
 
 		let lock_file = OpenOptions::new()
 			.create(true)
 			.read(true)
 			.write(true)
-			.open(lock_path)?;
+			.open(&lock_path)
+			.map_err(|source| RestartTrackerError::Io {
+				operation: "open restart history lock",
+				path: lock_path.clone(),
+				source,
+			})?;
 
-		FileExt::lock_exclusive(&lock_file)?;
+		FileExt::lock_exclusive(&lock_file).map_err(|source| {
+			RestartTrackerError::Io {
+				operation: "lock restart history",
+				path: lock_path.clone(),
+				source,
+			}
+		})?;
 
-		// Always reload after acquiring the lock.
-		let result = (|| -> Result<T, Box<dyn Error + Send + Sync>> {
+		let result = (|| -> Result<T, RestartTrackerError> {
 			let mut history = if self.path.exists() {
-				let bytes = fs::read(&self.path)?;
-				ciborium::de::from_reader(bytes.as_slice())?
+				let bytes = fs::read(&self.path).map_err(|source| {
+					RestartTrackerError::Io {
+						operation: "read restart history",
+						path: self.path.clone(),
+						source,
+					}
+				})?;
+
+				ciborium::de::from_reader(bytes.as_slice()).map_err(|source| {
+					RestartTrackerError::DecodeHistory {
+						path: self.path.clone(),
+						source,
+					}
+				})?
 			} else {
 				RestartHistory::default()
 			};
@@ -156,29 +179,49 @@ impl RestartTracker {
 
 			let value = operation(&mut history)?;
 
-			// Serialize as CBOR.
 			let mut bytes = Vec::new();
-			ciborium::ser::into_writer(&history, &mut bytes)?;
 
-			// Write a temporary file and atomically replace the history.
+			ciborium::ser::into_writer(&history, &mut bytes)
+				.map_err(RestartTrackerError::EncodeHistory)?;
+
 			let tmp = self.path.with_extension("tmp");
-			fs::write(&tmp, bytes)?;
-			fs::rename(&tmp, &self.path)?;
+
+			fs::write(&tmp, bytes).map_err(|source| {
+				RestartTrackerError::Io {
+					operation: "write temporary restart history",
+					path: tmp.clone(),
+					source,
+				}
+			})?;
+
+			fs::rename(&tmp, &self.path).map_err(|source| {
+				RestartTrackerError::Io {
+					operation: "replace restart history",
+					path: self.path.clone(),
+					source,
+				}
+			})?;
 
 			Ok(value)
 		})();
 
-		let unlock_result = FileExt::unlock(&lock_file);
+		let unlock_result = FileExt::unlock(&lock_file).map_err(|source| {
+			RestartTrackerError::Io {
+				operation: "unlock restart history",
+				path: lock_path,
+				source,
+			}
+		});
 
 		match (result, unlock_result) {
 			(Err(err), _) => Err(err),
-			(Ok(_), Err(err)) => Err(err.into()),
+			(Ok(_), Err(err)) => Err(err),
 			(Ok(value), Ok(())) => Ok(value),
 		}
 	}
 
 	/// Number of restarts in the rolling window.
-	fn count(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
+	pub fn count(&self) -> Result<usize, RestartTrackerError> {
 		self.with_history(|history| {
 			let now = Self::now()?;
 			let cutoff = now.saturating_sub(self.window.as_secs());
@@ -190,7 +233,7 @@ impl RestartTracker {
 	}
 
 	/// Average restart rate in restarts per second.
-	fn average_rate(&self) -> Result<f64, Box<dyn Error + Send + Sync>> {
+	pub fn average_rate(&self) -> Result<f64, RestartTrackerError> {
 		self.with_history(|history| {
 			let now = Self::now()?;
 			let cutoff = now.saturating_sub(self.window.as_secs());
@@ -203,19 +246,19 @@ impl RestartTracker {
 		})
 	}
 
-	fn limit_reached(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+	pub fn limit_reached(&self) -> Result<bool, RestartTrackerError> {
 		Ok(self.count()? > self.limit)
 	}
 
 	/// Record an event only when this method is called.
-	fn record_restart(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+	pub fn record_restart(&self) -> Result<(), RestartTrackerError> {
 		self.with_history(|history| {
 			history.events.push(Self::now()?);
 			Ok(())
 		})
 	}
 
-	fn try_record_restart(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
+	pub fn try_record_restart(&self) -> Result<bool, RestartTrackerError> {
 		self.with_history(|history| {
 			let now = Self::now()?;
 			let cutoff = now.saturating_sub(self.window.as_secs());
@@ -233,6 +276,36 @@ impl RestartTracker {
 		})
 	}
 
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestartTrackerError {
+	#[error("restart window must be greater than zero")]
+	ZeroWindow,
+
+	#[error("restart limit must be greater than zero")]
+	ZeroLimit,
+
+	#[error("{operation} `{path}` failed: {source}")]
+	Io {
+		operation: &'static str,
+		path: PathBuf,
+		#[source]
+		source: io::Error,
+	},
+
+	#[error("failed to decode restart history `{path}`: {source}")]
+	DecodeHistory {
+		path: PathBuf,
+		#[source]
+		source: ciborium::de::Error<io::Error>,
+	},
+
+	#[error("failed to encode restart history: {0}")]
+	EncodeHistory(#[source] ciborium::ser::Error<io::Error>),
+
+	#[error(transparent)]
+	SystemTime(#[from] std::time::SystemTimeError),
 }
 
 
@@ -410,15 +483,20 @@ pub fn soft_parse_ip_network(
 
 pub async fn get_interface_ips(
 	interface_name: Option<&str>,
-) -> Result<Vec<InterfaceIp>, Box<dyn Error + Send + Sync>> {
-	let (connection, handle, _) = rtnetlink::new_connection()?;
+) -> Result<Vec<InterfaceIp>, InterfaceIpsError> {
+	let (connection, handle, _) =
+		rtnetlink::new_connection().map_err(InterfaceIpsError::Connection)?;
 	tokio::spawn(connection);
 
 	// Map selected interface indexes to their primary names.
 	let mut selected: HashMap<u32, String> = HashMap::new();
 	let mut links = handle.link().get().execute();
 
-	while let Some(link) = links.try_next().await? {
+	while let Some(link) = links
+		.try_next()
+		.await
+		.map_err(InterfaceIpsError::LinkQuery)?
+	{
 		let mut name: Option<String> = None;
 		let mut altnames: Vec<String> = Vec::new();
 
@@ -444,7 +522,7 @@ pub async fn get_interface_ips(
 
 		let matches = interface_name.map_or(true, |wanted| {
 			name == wanted
-				|| altnames.iter().any(|alt| alt == wanted)
+			|| altnames.iter().any(|alt| alt == wanted)
 		});
 
 		if matches {
@@ -456,7 +534,11 @@ pub async fn get_interface_ips(
 	let mut result = Vec::new();
 	let mut addresses = handle.address().get().execute();
 
-	while let Some(addr) = addresses.try_next().await? {
+	while let Some(addr) = addresses
+		.try_next()
+		.await
+		.map_err(InterfaceIpsError::AddressQuery)?
+	{
 		let Some(interface) = selected.get(&addr.header.index) else {
 			continue;
 		};
@@ -489,19 +571,38 @@ pub async fn get_interface_ips(
 	Ok(result)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum InterfaceIpsError {
+    #[error("failed to create rtnetlink connection: {0}")]
+    Connection(#[source] io::Error),
+
+    #[error("failed to enumerate network links: {0}")]
+    LinkQuery(#[source] rtnetlink::Error),
+
+    #[error("failed to enumerate interface addresses: {0}")]
+    AddressQuery(#[source] rtnetlink::Error),
+
+    #[error("invalid IP prefix returned by netlink: {0}")]
+    Prefix(#[from] ipnet::PrefixLenError),
+}
+
 pub fn parse_ip_file(
 	path: impl AsRef<Path>,
-) -> Result<Vec<IpNet>, Box<dyn Error + Send + Sync>> {
-	use std::io::{self, ErrorKind};
-
+) -> Result<Vec<IpNet>, IpFileError> {
 	let path = path.as_ref();
-	let contents = std::fs::read_to_string(path)?;
+
+	let contents = fs::read_to_string(path).map_err(|source| {
+		IpFileError::Read {
+			path: path.to_path_buf(),
+			source,
+		}
+	})?;
+
 	let mut result = Vec::new();
 
 	for (index, raw_line) in contents.lines().enumerate() {
 		let line_number = index + 1;
 
-		// Ignore comments and blank lines.
 		let line = raw_line.split('#').next().unwrap_or("").trim();
 
 		if line.is_empty() {
@@ -513,57 +614,52 @@ pub fn parse_ip_file(
 			None => (line, None),
 		};
 
-		let address = ip_text.parse::<IpAddr>().map_err(|e| {
-			io::Error::new(
-				ErrorKind::InvalidData,
-				format!(
-					"{}:{}: invalid IP address '{}': {}",
-					path.display(),
-					line_number,
-					ip_text,
-					e
-				),
-			)
+		let address = ip_text.parse::<IpAddr>().map_err(|source| {
+			IpFileError::InvalidAddress {
+				path: path.to_path_buf(),
+				line: line_number,
+				input: ip_text.to_owned(),
+				source,
+			}
 		})?;
 
 		let prefix_len = match prefix_text {
 			Some(prefix_text) => {
-				let prefix_len = prefix_text.parse::<u8>().map_err(|e| {
-					io::Error::new(
-						ErrorKind::InvalidData,
-						format!(
-							"{}:{}: invalid CIDR prefix '{}': {}",
-							path.display(),
-							line_number,
-							prefix_text,
-							e
-						),
-					)
+				let prefix = prefix_text.parse::<u8>().map_err(|source| {
+					IpFileError::InvalidPrefix {
+						path: path.to_path_buf(),
+						line: line_number,
+						input: prefix_text.to_owned(),
+						source,
+					}
 				})?;
 
 				let max_prefix = if address.is_ipv6() { 128 } else { 32 };
 
-				if prefix_len > max_prefix {
-					return Err(io::Error::new(
-						ErrorKind::InvalidData,
-						format!(
-							"{}:{}: prefix /{} is invalid for {}",
-							path.display(),
-							line_number,
-							prefix_len,
-							address
-						),
-					)
-					.into());
+				if prefix > max_prefix {
+					return Err(IpFileError::PrefixOutOfRange {
+						path: path.to_path_buf(),
+						line: line_number,
+						prefix,
+						address,
+					});
 				}
 
-				Some(prefix_len)
+				Some(prefix)
 			}
 			None => None,
 		};
 
 		let network = match prefix_len {
-			Some(prefix_len) => IpNet::new(address, prefix_len)?,
+			Some(prefix) => {
+				IpNet::new(address, prefix).map_err(|source| {
+					IpFileError::InvalidNetwork {
+						path: path.to_path_buf(),
+						line: line_number,
+						source,
+					}
+				})?
+			}
 			None => IpNet::from(address),
 		};
 
@@ -573,14 +669,55 @@ pub fn parse_ip_file(
 	Ok(result)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum IpFileError {
+	#[error("failed to read IP address file `{path}`: {source}")]
+	Read {
+		path: PathBuf,
+		#[source]
+		source: io::Error,
+	},
+
+	#[error("{path}:{line}: invalid IP address `{input}`: {source}")]
+	InvalidAddress {
+		path: PathBuf,
+		line: usize,
+		input: String,
+		#[source]
+		source: std::net::AddrParseError,
+	},
+
+	#[error("{path}:{line}: invalid CIDR prefix `{input}`: {source}")]
+	InvalidPrefix {
+		path: PathBuf,
+		line: usize,
+		input: String,
+		#[source]
+		source: std::num::ParseIntError,
+	},
+
+	#[error("{path}:{line}: prefix /{prefix} is invalid for {address}")]
+	PrefixOutOfRange {
+		path: PathBuf,
+		line: usize,
+		prefix: u8,
+		address: IpAddr,
+	},
+
+	#[error("{path}:{line}: invalid network prefix: {source}")]
+	InvalidNetwork {
+		path: PathBuf,
+		line: usize,
+		#[source]
+		source: ipnet::PrefixLenError,
+	},
+}
+
 fn init_logging(
-	path: Option<impl AsRef<Path>>,
+	path: Option<impl AsRef<Path> + std::fmt::Display>,
 	level: LevelFilter,
 	stdout_timestamps: StdoutTimestamps,
-) -> Result<
-	Option<WorkerGuard>,
-	Box<dyn std::error::Error + Send + Sync>,
-> {
+) -> anyhow::Result<Option<WorkerGuard>> {
 	let filter = EnvFilter::try_from_default_env()
 		.unwrap_or_else(|_| EnvFilter::new(level.to_string()));
 
@@ -599,7 +736,7 @@ fn init_logging(
 	if let Some(path) = path {
 		let limit = uom::si::f64::Information::new::<megabyte>(5.0);
 
-		let writer = RollingWriter::builder(path)
+		let writer = RollingWriter::builder(&path)
 			.rotation(Rotation::Never)
 			.max_file_size(limit.get::<byte>() as u64)
 			.max_files(3)
@@ -608,14 +745,21 @@ fn init_logging(
 		let (file_writer, guard) = non_blocking(writer);
 
 		tracing_subscriber::registry()
-			.with(filter)
+			.with(filter.clone())
 			.with(stdout_layer)
 			.with(
 				tracing_subscriber::fmt::layer()
 					.with_writer(file_writer)
 					.with_ansi(false),
 			)
-			.try_init()?;
+			.try_init()
+			.with_context(|| {
+				format!(
+					"failed to init\npath: {}\nfilter: {}\n",
+					&path,
+					&filter,
+				)
+			})?;
 
 		Ok(Some(guard))
 	} else {
@@ -628,8 +772,27 @@ fn init_logging(
 	}
 }
 
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error(transparent)]
+    RestartTracker(#[from] RestartTrackerError),
+
+    #[error("failed to connect to the system bus: {0}")]
+    SystemBus(#[source] zbus_systemd::zbus::Error),
+
+    #[error("failed to create systemd manager proxy: {0}")]
+    SystemdManager(#[source] zbus_systemd::zbus::Error),
+
+    #[error("failed to queue restart of systemd unit `{service}`: {source}")]
+    RestartUnit {
+        service: String,
+        #[source]
+        source: zbus_systemd::zbus::Error,
+    },
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn main() -> Result<(), AppError> {
 	let args = Args::parse();
 
 	match args.niceness {
@@ -783,15 +946,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 		);
 
 		if tracker.try_record_restart()? {
-			let connection = Connection::system().await?;
-			let manager = ManagerProxy::new(&connection).await?;
+			let connection = Connection::system()
+				.await
+				.map_err(|source| AppError::SystemBus(source))?;
+
+			let manager = ManagerProxy::new(&connection)
+				.await
+				.map_err(|source| AppError::SystemdManager(source))?;
 
 			let job = manager
 				.restart_unit(
 					args.service.clone(),
 					"replace".to_owned(),
 				)
-			.await?;
+			.await
+			.map_err(|source| AppError::RestartUnit {
+				service: args.service.clone(),
+				source,
+			})?;
 
 			info!(
 				"Queued restart of {} (job: {})",
