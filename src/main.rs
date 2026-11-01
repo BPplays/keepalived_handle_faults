@@ -573,17 +573,17 @@ pub async fn get_interface_ips(
 
 #[derive(Debug, thiserror::Error)]
 pub enum InterfaceIpsError {
-    #[error("failed to create rtnetlink connection: {0}")]
-    Connection(#[source] io::Error),
+	#[error("failed to create rtnetlink connection: {0}")]
+	Connection(#[source] io::Error),
 
-    #[error("failed to enumerate network links: {0}")]
-    LinkQuery(#[source] rtnetlink::Error),
+	#[error("failed to enumerate network links: {0}")]
+	LinkQuery(#[source] rtnetlink::Error),
 
-    #[error("failed to enumerate interface addresses: {0}")]
-    AddressQuery(#[source] rtnetlink::Error),
+	#[error("failed to enumerate interface addresses: {0}")]
+	AddressQuery(#[source] rtnetlink::Error),
 
-    #[error("invalid IP prefix returned by netlink: {0}")]
-    Prefix(#[from] ipnet::PrefixLenError),
+	#[error("invalid IP prefix returned by netlink: {0}")]
+	Prefix(#[from] ipnet::PrefixLenError),
 }
 
 pub fn parse_ip_file(
@@ -774,21 +774,21 @@ fn init_logging(
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
-    #[error(transparent)]
-    RestartTracker(#[from] RestartTrackerError),
+	#[error(transparent)]
+	RestartTracker(#[from] RestartTrackerError),
 
-    #[error("failed to connect to the system bus: {0}")]
-    SystemBus(#[source] zbus_systemd::zbus::Error),
+	#[error("failed to connect to the system bus: {0}")]
+	SystemBus(#[source] zbus_systemd::zbus::Error),
 
-    #[error("failed to create systemd manager proxy: {0}")]
-    SystemdManager(#[source] zbus_systemd::zbus::Error),
+	#[error("failed to create systemd manager proxy: {0}")]
+	SystemdManager(#[source] zbus_systemd::zbus::Error),
 
-    #[error("failed to queue restart of systemd unit `{service}`: {source}")]
-    RestartUnit {
-        service: String,
-        #[source]
-        source: zbus_systemd::zbus::Error,
-    },
+	#[error("failed to queue restart of systemd unit `{service}`: {source}")]
+	RestartUnit {
+		service: String,
+		#[source]
+		source: zbus_systemd::zbus::Error,
+	},
 }
 
 #[tokio::main]
