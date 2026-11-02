@@ -185,7 +185,12 @@ impl RestartTracker {
 			let mut bytes = Vec::new();
 
 			ciborium::ser::into_writer(&history, &mut bytes)
-				.map_err(RestartTrackerError::EncodeHistory)?;
+				.map_err(|source|
+					RestartTrackerError::EncodeHistory {
+						path: self.path.clone(),
+						source,
+					}
+				)?;
 
 			let tmp = self.path.with_extension("tmp");
 
@@ -321,8 +326,12 @@ pub enum RestartTrackerError {
 		source: ciborium::de::Error<io::Error>,
 	},
 
-	#[error("failed to encode restart history: {0}")]
-	EncodeHistory(#[source] ciborium::ser::Error<io::Error>),
+    #[error("failed to encode restart history `{path}`: {source}")]
+    EncodeHistory {
+        path: PathBuf,
+        #[source]
+        source: ciborium::ser::Error<io::Error>,
+    },
 
 	#[error(transparent)]
 	SystemTime(#[from] std::time::SystemTimeError),
