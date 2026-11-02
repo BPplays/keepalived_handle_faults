@@ -126,6 +126,7 @@ impl RestartTracker {
 				fs::create_dir_all(parent).map_err(|source| {
 					RestartTrackerError::Io {
 						operation: "create restart history directory",
+						kind: RestartTrackerIoErrType::Write,
 						path: parent.to_path_buf(),
 						source,
 					}
@@ -142,6 +143,7 @@ impl RestartTracker {
 			.open(&lock_path)
 			.map_err(|source| RestartTrackerError::Io {
 				operation: "open restart history lock",
+				kind: RestartTrackerIoErrType::Lock,
 				path: lock_path.clone(),
 				source,
 			})?;
@@ -149,6 +151,7 @@ impl RestartTracker {
 		FileExt::lock_exclusive(&lock_file).map_err(|source| {
 			RestartTrackerError::Io {
 				operation: "lock restart history",
+				kind: RestartTrackerIoErrType::Lock,
 				path: lock_path.clone(),
 				source,
 			}
@@ -159,6 +162,7 @@ impl RestartTracker {
 				let bytes = fs::read(&self.path).map_err(|source| {
 					RestartTrackerError::Io {
 						operation: "read restart history",
+						kind: RestartTrackerIoErrType::Read,
 						path: self.path.clone(),
 						source,
 					}
@@ -188,6 +192,7 @@ impl RestartTracker {
 			fs::write(&tmp, bytes).map_err(|source| {
 				RestartTrackerError::Io {
 					operation: "write temporary restart history",
+					kind: RestartTrackerIoErrType::Write,
 					path: tmp.clone(),
 					source,
 				}
@@ -196,6 +201,7 @@ impl RestartTracker {
 			fs::rename(&tmp, &self.path).map_err(|source| {
 				RestartTrackerError::Io {
 					operation: "replace restart history",
+					kind: RestartTrackerIoErrType::Write,
 					path: self.path.clone(),
 					source,
 				}
@@ -207,6 +213,7 @@ impl RestartTracker {
 		let unlock_result = FileExt::unlock(&lock_file).map_err(|source| {
 			RestartTrackerError::Io {
 				operation: "unlock restart history",
+				kind: RestartTrackerIoErrType::Unlock,
 				path: lock_path,
 				source,
 			}
@@ -277,6 +284,19 @@ impl RestartTracker {
 
 }
 
+
+#[derive(Debug, thiserror::Error)]
+pub enum RestartTrackerIoErrType {
+    #[error("read")]
+    Read,
+    #[error("write")]
+    Write,
+    #[error("lock")]
+    Lock,
+    #[error("unlock")]
+    Unlock,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RestartTrackerError {
 	#[error("restart window must be greater than zero")]
@@ -285,9 +305,10 @@ pub enum RestartTrackerError {
 	#[error("restart limit must be greater than zero")]
 	ZeroLimit,
 
-	#[error("{operation} `{path}` failed: {source}")]
+	#[error("{operation} `{path}` failed ({kind}): {source}")]
 	Io {
 		operation: &'static str,
+		kind: RestartTrackerIoErrType,
 		path: PathBuf,
 		#[source]
 		source: io::Error,
