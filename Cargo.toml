@@ -25,4 +25,4 @@ uom = "0.38.0"
 zbus_systemd = { version = "0.26200.0", features = ["systemd1", "zbus-async-tokio", "locale1", "login1", "hostname1", "timesync1", "timedate1", "resolve1"] }
 
 
-common = { git = "https://github.com/BPplays/NetworkManager_dispatchers", rev = "f3bd7fb70e425ef7386257c8f09d0b7a32884e7f" }
+common = { git = "https://github.com/BPplays/NetworkManager_dispatchers", rev = "a96a84320fa1868272bcfa0cae9510792a7f151e" }

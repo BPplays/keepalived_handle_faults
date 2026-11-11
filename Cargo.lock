@@ -390,7 +390,7 @@ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/BPplays/NetworkManager_dispatchers?rev=f3bd7fb70e425ef7386257c8f09d0b7a32884e7f#f3bd7fb70e425ef7386257c8f09d0b7a32884e7f"
+source = "git+https://github.com/BPplays/NetworkManager_dispatchers?rev=a96a84320fa1868272bcfa0cae9510792a7f151e#a96a84320fa1868272bcfa0cae9510792a7f151e"
 dependencies = [
  "bytesize",
  "clap",
@@ -399,11 +399,9 @@ dependencies = [
  "nmrs",
  "strum",
  "thiserror",
- "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "uom",
 ]
 
 [[package]]
