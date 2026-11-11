@@ -17,9 +17,12 @@ rtnetlink = "0.23.0"
 rustix = { version = "1.1.5", features = ["process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["full"] }
+tokio = { version = "1.54", features = ["full"] }
 tracing = { version = "0.1.44", features = ["async-await", "log"] }
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["time", "tracing", "tracing-serde", "serde", "local-time", "chrono", "env-filter"] }
 uom = "0.38.0"
 zbus_systemd = { version = "0.26200.0", features = ["systemd1", "zbus-async-tokio", "locale1", "login1", "hostname1", "timesync1", "timedate1", "resolve1"] }
+
+
+common = { git = "https://github.com/BPplays/NetworkManager_dispatchers", rev = "f3bd7fb70e425ef7386257c8f09d0b7a32884e7f" }

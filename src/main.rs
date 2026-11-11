@@ -7,7 +7,7 @@ use tracing;
 use tracing::{debug, error, info, warn};
 use uom::si::information::{byte, megabyte, gigabyte};
 use humantime;
-use rustix::process::setpriority_process;
+use common;
 
 use std::collections::HashSet;
 
@@ -996,7 +996,26 @@ async fn main() -> Result<(), AppError> {
 
 	match args.niceness {
 		Some(niceness) => {
-			let _ = setpriority_process(None, niceness);
+			// let _ = setpriority_process(None, niceness);
+
+			let n = common::Nice::try_from(niceness);
+
+			match n {
+				Ok(n) => {
+					match common::set_niceness(n) {
+						Ok(_) => {}
+						Err(e) => {
+							eprintln!("error setting nicesness: {}", e)
+						}
+					}
+				}
+				Err(e) => {
+					eprint!(
+						"error while making niceness object: {}",
+						e,
+					)
+				}
+			}
 		}
 		None => {}
 	}
