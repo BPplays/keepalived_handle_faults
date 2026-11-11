@@ -1010,7 +1010,7 @@ async fn main() -> Result<(), AppError> {
 					}
 				}
 				Err(e) => {
-					eprint!(
+					eprintln!(
 						"error while making niceness object: {}",
 						e,
 					)
